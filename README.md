@@ -14,6 +14,7 @@ floating overlay while you review in AnkiDroid.
 | Select | Cycle which AI app Y opens (ChatGPT -> Claude -> Gemini -> loop) |
 | D-pad Up | Very slow controlled smooth scroll up (1.5s per swipe) |
 | D-pad Down | Very slow controlled smooth scroll down (1.5s per swipe) |
+| D-pad Left | Show the on-device Granite explanation tooltip for the current card |
 | L1 | Toggle the on-device Granite tooltip on/off |
 | R1 | Cycle the active Granite model: Granite 4.1:3b -> Granite 4:micro -> Granite 4:1b (loop) |
 | L2 | Untouched - left as AnkiDroid's own menu-navigation button |
@@ -24,11 +25,11 @@ A small status overlay (toggled the first time you press L1, R1, or Select)
 shows the currently selected AI app and Granite model/on-off state in the
 top-right corner.
 
-Separately, **long-pressing or double-tapping** a word/phrase on a card
-while reviewing shows the floating explanation tooltip - same dark card,
-fade-in, and three-dot loading pulse as the original desktop LLM Hover
-Tooltip Anki add-on, generated live by whichever Granite model R1 currently
-has selected.
+Press **D-pad Left** while reviewing a card to show the floating explanation
+tooltip - same dark card, fade-in, and three-dot loading pulse as the
+original desktop LLM Hover Tooltip Anki add-on, generated live by whichever
+Granite model R1 currently has selected, for the entire current card's text.
+
 
 ## One-time setup
 1. **Build the APK** (see "Build & install" below - this one needs Android
@@ -72,34 +73,31 @@ timing as the CSS version, not a naive linear tween). It's drawn as a real
 system overlay window (`TYPE_ACCESSIBILITY_OVERLAY`) positioned near your
 tap point, with edge-avoidance so it never draws off-screen.
 
-## Important caveat: how long-press/double-tap actually works
-AnkiCopy is a separate app from AnkiDroid, so it can't inject JavaScript
-into AnkiDroid's WebView to detect text selection the way the desktop addon
-does inside Anki's own process. Two consequences:
+## Why D-pad Left triggers the tooltip (not long-press/double-tap)
+An earlier version of this app tried to detect long-press/double-tap on
+card text by turning Android's accessibility "touch exploration" mode
+(the same mechanism TalkBack uses) on only while AnkiDroid was foreground,
+off otherwise. **That caused system-wide freezes requiring a hard phone
+restart.** The root cause: touch exploration isn't a clean per-service
+on/off switch - the OS's own docs note that toggling one service's flag
+doesn't deterministically control system-wide touch-exploration state -
+and the event used to detect "entered/left AnkiDroid"
+(`TYPE_WINDOW_STATE_CHANGED`) fires far more often than that, on every
+dialog, fragment change, and system popup. The result was touch
+exploration flipping on/off rapidly and wedging the system's input
+handler. That mechanism has been **removed entirely** - this build never
+calls `setServiceInfo()` at runtime and never requests
+`canRequestTouchExplorationMode`.
 
-1. **No true word-level selection.** What actually happens: Android's
-   accessibility "touch exploration" mode (the same mechanism TalkBack
-   uses) reports `TYPE_VIEW_HOVER_ENTER` events with the accessibility
-   node under your finger. AnkiCopy uses that node's bounds as the tap
-   point and its own text as a "focus hint" - the *whole card text* is
-   still sent to the model, with an instruction to prioritize whatever's
-   near the tapped node. It's a good approximation, not literal
-   click-and-drag text selection.
-
-2. **Touch exploration changes tap behavior while AnkiDroid is
-   foreground.** Detecting long-press/double-tap this way requires
-   touch-exploration mode to be active, and there's no supported Android
-   API to scope that to "just this one app's WebView" - it's process-wide
-   for whichever window has focus. To avoid this leaking into every other
-   app, `AnkiAccessibilityService` turns touch exploration **on only while
-   AnkiDroid is the foreground window**, and off the instant focus moves
-   elsewhere (see `setTouchExplorationEnabled()`). While a card is open,
-   ALL taps in AnkiDroid - including "Show Answer" and the answer buttons -
-   will behave like TalkBack: first tap focuses, second tap (or a
-   double-tap) activates. This is a real, felt trade-off, not just a
-   technical footnote - if it's too disruptive to your review flow day to
-   day, the alternative from our design discussion was triggering
-   explanations from a controller button instead of a screen gesture.
+**Also worth knowing:** because AnkiCopy is a separate app from AnkiDroid,
+it was never able to get true word-level text selection anyway - even the
+removed gesture approach only approximated a "focus point" via whichever
+accessibility node was under your finger, then sent the *whole card's*
+text to the model with that node's text as a hint. D-pad Left does the
+same thing (whole card text, no selection needed), just triggered by a
+plain button press instead of a fragile system-wide input mode - so you
+lose nothing in explanation quality, only the (already-approximate) idea
+of pointing at a specific word.
 
 ## If a button isn't doing what you expect: turn on Debug Mode
 Open the app, flip the **Debug mode** switch on. Now press any button that

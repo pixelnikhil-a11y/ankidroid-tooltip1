@@ -1,4 +1,4 @@
 <resources>
     <string name="app_name">AnkiCopy</string>
-    <string name="accessibility_service_description">Lets your gamepad buttons copy AnkiDroid card content to the clipboard, open your chosen AI app in split screen, cycle Granite Ollama models and toggle them on/off, and scroll cards smoothly and slowly - all without a separate automation app.</string>
+    <string name="accessibility_service_description">Lets your gamepad buttons copy AnkiDroid card content to the clipboard, open your chosen AI app in split screen, cycle on-device Granite models and toggle them on/off, show an explanation tooltip with D-pad Left, and scroll cards smoothly and slowly - all without a separate automation app.</string>
 </resources>

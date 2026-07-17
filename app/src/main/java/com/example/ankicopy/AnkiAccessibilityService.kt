@@ -1,7 +1,6 @@
 package com.example.ankicopy
 
 import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.GestureDescription
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -9,7 +8,6 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Path
 import android.graphics.PixelFormat
-import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -33,8 +31,11 @@ import com.example.ankicopy.overlay.TooltipOverlay
  *                (default = ChatGPT; cycle AI target with SELECT)
  *   SELECT     – cycle which AI app Y targets (ChatGPT → Claude → Gemini)
  *
- *   D-pad Up   – very slow smooth scroll up
- *   D-pad Down – very slow smooth scroll down
+ *   D-pad Up    – very slow smooth scroll up
+ *   D-pad Down  – very slow smooth scroll down
+ *   D-pad Left  – show the on-device Granite explanation tooltip for the
+ *                 current card (see "why D-pad Left, not a screen gesture"
+ *                 below)
  *
  *   L1         – toggle the on-device Granite tooltip on / off
  *   R1         – cycle active Granite model
@@ -46,31 +47,27 @@ import com.example.ankicopy.overlay.TooltipOverlay
  *   Start      – copy card + explanation prompt to clipboard
  *                (no app launch — paste manually or use Y to open the AI)
  *
- * Long-press or double-tap a word on a card (while reviewing in AnkiDroid)
- * → shows the floating explanation tooltip, generated on-device by
- * whichever Granite model is currently active via LlmManager.
- *
- * IMPORTANT CAVEAT (see design discussion): detecting long-press/double-tap
- * on arbitrary text inside ANOTHER app's WebView requires Android touch
- * exploration mode, which changes tap semantics system-wide while active
- * (first tap focuses, second tap activates - like TalkBack). To avoid
- * that leaking into every other app, this service turns touch exploration
- * ON only while AnkiDroid is the foreground window and OFF the instant
- * focus moves elsewhere (see setTouchExplorationEnabled()). This means:
- * normal AnkiDroid taps (Show Answer, Again/Good buttons) will also be
- * affected while a card is open - tap once to focus the button, tap again
- * to activate it, same as everywhere else touch exploration is active.
+ * ── Why D-pad Left instead of long-press/double-tap on the card ──────────
+ * An earlier version of this service tried to detect long-press/double-tap
+ * on card text by turning Android's touch-exploration mode on/off per
+ * foreground app. That caused system-wide input freezes requiring a hard
+ * restart: touch exploration isn't a clean per-service on/off switch (the
+ * OS documents that toggling it doesn't deterministically track a single
+ * service's flag, and TYPE_WINDOW_STATE_CHANGED fires far more often than
+ * "entered/left AnkiDroid" - every dialog, fragment change, and system
+ * popup triggers it), so the mode was flipping rapidly and repeatedly and
+ * wedging the system's touch-exploration handler. That mechanism has been
+ * removed entirely - it never touches serviceInfo/setServiceInfo now, and
+ * canRequestTouchExplorationMode is no longer requested. D-pad Left is a
+ * plain button press, same mechanism as every other mapped button here -
+ * no touch-mode side effects possible.
  */
 class AnkiAccessibilityService : AccessibilityService() {
 
     companion object {
         const val ANKI_PACKAGE = "com.ichi2.anki"
-        private const val LONG_PRESS_TIMEOUT_MS = 500L
-        private const val DOUBLE_TAP_WINDOW_MS = 300L
-        private const val TAP_SLOP_PX = 40
 
-        // Scroll is slower the higher this number. Bumped up again from the
-        // previous 950ms per the "slow down even more" request.
+        // Scroll is slower the higher this number.
         private const val SCROLL_DURATION_MS = 1500L
     }
 
@@ -80,135 +77,59 @@ class AnkiAccessibilityService : AccessibilityService() {
 
     private lateinit var tooltipOverlay: TooltipOverlay
 
-    // ── touch-exploration-per-app tracking ──────────────────────────────────
-    private var touchExplorationActiveForAnki = false
-
-    // ── double-tap / long-press bookkeeping ─────────────────────────────────
-    private var lastTapTimeMs = 0L
-    private var lastTapX = 0
-    private var lastTapY = 0
-    private var pendingLongPressRunnable: Runnable? = null
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         tooltipOverlay = TooltipOverlay(this)
         toast("AnkiCopy active | AI: ${Prefs.getTarget(this).label} | Granite: ${Prefs.getActiveSlot(this).label} ${if (Prefs.getLlmEnabled(this)) "ON" else "OFF"}")
     }
 
-    // ──────────────────────────────────────────────────────────────────────────
-    // Event stream: window tracking (flip touch exploration per foreground
-    // app) + hover-enter events (our long-press/double-tap signal while
-    // touch exploration is active for AnkiDroid).
-    // ──────────────────────────────────────────────────────────────────────────
-
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        val e = event ?: return
-        when (e.eventType) {
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                val pkg = e.packageName?.toString()
-                setTouchExplorationEnabled(pkg == ANKI_PACKAGE)
-            }
-            AccessibilityEvent.TYPE_VIEW_HOVER_ENTER -> {
-                if (touchExplorationActiveForAnki) {
-                    val src = e.source ?: return
-                    handleHoverEnter(src)
-                }
-            }
-        }
-    }
-
-    private fun setTouchExplorationEnabled(enabled: Boolean) {
-        if (enabled == touchExplorationActiveForAnki) return
-        touchExplorationActiveForAnki = enabled
-        val info = serviceInfo ?: return
-        info.flags = if (enabled) {
-            info.flags or AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE
-        } else {
-            info.flags and AccessibilityServiceInfo.FLAG_REQUEST_TOUCH_EXPLORATION_MODE.inv()
-        }
-        serviceInfo = info
-        if (!enabled) {
-            // Leaving AnkiDroid - clear any pending long-press and hide the
-            // tooltip so it doesn't linger over whatever app comes next.
-            pendingLongPressRunnable?.let { mainHandler.removeCallbacks(it) }
-            pendingLongPressRunnable = null
-            if (::tooltipOverlay.isInitialized && tooltipOverlay.isShowing) tooltipOverlay.hide()
-        }
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     override fun onInterrupt() {}
 
     // ──────────────────────────────────────────────────────────────────────────
-    // Long-press / double-tap detection via hover-enter events
+    // D-pad Left: show the Granite explanation tooltip for the current card
     // ──────────────────────────────────────────────────────────────────────────
 
-    /**
-     * In touch exploration mode, AnkiDroid's WebView surfaces
-     * TYPE_VIEW_HOVER_ENTER accessibility events (with a source node +
-     * screen bounds) as the user's finger rests over content. We treat the
-     * hover-enter location as our "tap point": a long dwell without moving
-     * on => long-press; two quick separate hover-enters at nearly the same
-     * spot => double-tap.
-     */
-    private fun handleHoverEnter(node: AccessibilityNodeInfo) {
-        val bounds = Rect()
-        node.getBoundsInScreen(bounds)
-        val x = bounds.centerX()
-        val y = bounds.centerY()
-
-        val now = System.currentTimeMillis()
-        val dx = kotlin.math.abs(x - lastTapX)
-        val dy = kotlin.math.abs(y - lastTapY)
-        val isNearLastTap = dx < TAP_SLOP_PX && dy < TAP_SLOP_PX
-        val withinDoubleTapWindow = (now - lastTapTimeMs) < DOUBLE_TAP_WINDOW_MS
-
-        if (isNearLastTap && withinDoubleTapWindow) {
-            // Double-tap confirmed - cancel any pending long-press timer and
-            // fire immediately.
-            pendingLongPressRunnable?.let { mainHandler.removeCallbacks(it) }
-            pendingLongPressRunnable = null
-            lastTapTimeMs = 0L
-            triggerExplanation(node, x, y)
-            return
-        }
-
-        lastTapTimeMs = now
-        lastTapX = x
-        lastTapY = y
-
-        // Schedule a long-press trigger; cancelled if the user moves on
-        // (a new hover-enter elsewhere) before the timeout fires.
-        pendingLongPressRunnable?.let { mainHandler.removeCallbacks(it) }
-        val runnable = Runnable { triggerExplanation(node, x, y) }
-        pendingLongPressRunnable = runnable
-        mainHandler.postDelayed(runnable, LONG_PRESS_TIMEOUT_MS)
-    }
-
-    private fun triggerExplanation(node: AccessibilityNodeInfo, x: Int, y: Int) {
+    private fun triggerExplanation() {
         if (!Prefs.getLlmEnabled(this)) {
             toast("Granite tooltip is OFF (L1 to enable)")
             return
         }
         val root = rootInActiveWindow
-        if (root == null || root.packageName?.toString() != ANKI_PACKAGE) return
-
-        // We can't get true word-level text selection from outside
-        // AnkiDroid's WebView (a separate app can't reach into another
-        // app's DOM) - so we grab the full card text as context and pass
-        // along the tapped node's own text as a "focus" hint for the
-        // model to prioritize.
-        val webViewNode = findNodeByClass(root, "android.webkit.WebView") ?: return
+        if (root == null || root.packageName?.toString() != ANKI_PACKAGE) {
+            toast("Open AnkiDroid first")
+            return
+        }
+        val webViewNode = findNodeByClass(root, "android.webkit.WebView")
+        if (webViewNode == null) {
+            toast("Card content not found – try again")
+            return
+        }
         val sb = StringBuilder()
         collectText(webViewNode, sb)
         val cardText = cleanText(sb.toString())
-        if (cardText.isBlank()) return
-
-        val focusHint = node.text?.toString()?.trim().orEmpty()
+        if (cardText.isBlank()) {
+            toast("Nothing to explain")
+            return
+        }
 
         val slot = Prefs.getActiveSlot(this)
-        val systemPrompt = buildSystemPrompt(focusHint)
+        if (!LlmManager.isSlotConfigured(this, slot)) {
+            toast("${slot.label} has no file set - open AnkiCopy to pick one")
+            return
+        }
+        val systemPrompt = Prefs.getExplanationSuffix(this).ifBlank {
+            "Explain this concept from the card clearly."
+        }
 
-        tooltipOverlay.showLoading(x, y)
+        // Anchor near the top-center of the screen - there's no tap point
+        // to anchor to anymore since this is a button press, not a gesture.
+        val dm = resources.displayMetrics
+        val anchorX = dm.widthPixels / 2
+        val anchorY = (dm.heightPixels * 0.25f).toInt()
+
+        tooltipOverlay.showLoading(anchorX, anchorY)
 
         LlmManager.generateExplanation(
             context = this,
@@ -225,16 +146,6 @@ class AnkiAccessibilityService : AccessibilityService() {
                 )
             }
         }
-    }
-
-    private fun buildSystemPrompt(focusHint: String): String {
-        val base = Prefs.getExplanationSuffix(this).ifBlank {
-            "Explain this concept from the card clearly."
-        }
-        return if (focusHint.isNotBlank()) {
-            "$base Focus your explanation on this part of the card if it's " +
-                "the most relevant term or phrase near where the user tapped: \"$focusHint\"."
-        } else base
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
@@ -258,6 +169,9 @@ class AnkiAccessibilityService : AccessibilityService() {
 
             KeyEvent.KEYCODE_DPAD_DOWN ->
                 { controlledScroll(down = true); true }
+
+            KeyEvent.KEYCODE_DPAD_LEFT ->
+                { triggerExplanation(); true }                           // Granite tooltip
 
             // L1 = toggle Granite tooltip on/off
             KeyEvent.KEYCODE_BUTTON_L1 ->
@@ -385,7 +299,7 @@ class AnkiAccessibilityService : AccessibilityService() {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // D-pad: very slow controlled scroll
+    // D-pad Up/Down: very slow controlled scroll
     // ──────────────────────────────────────────────────────────────────────────
 
     private fun controlledScroll(down: Boolean) {

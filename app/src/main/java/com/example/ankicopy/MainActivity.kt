@@ -58,6 +58,8 @@ class MainActivity : AppCompatActivity() {
                             (default = ChatGPT; change with SELECT)
               SELECT      – cycle AI target: ChatGPT → Claude → Gemini (→ loop)
               D-pad Up/Dn – very slow smooth scroll
+              D-pad Left  – show the on-device Granite explanation tooltip
+                            for the current card
               L1          – toggle the on-device Granite tooltip ON / OFF
               R1          – cycle active Granite model:
                               Granite 4.1:3b → Granite 4:micro → Granite 4:1b
@@ -65,10 +67,6 @@ class MainActivity : AppCompatActivity() {
               R2          – go home
               Start       – copy card + explanation prompt to clipboard
                             (no launch — use Y to open the AI)
-
-              Long-press / double-tap a word on a card while reviewing
-              → shows the floating explanation tooltip, generated on-device
-              by whichever Granite model is currently active.
         """.trimIndent()
 
         // ── Accessibility + overlay permissions ──────────────────────────────
